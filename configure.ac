@@ -52,6 +52,7 @@ PKG_PROG_PKG_CONFIG([0.24])
 LIBGLIB_REQUIRED=2.32.0
 LIBGTK_REQUIRED=3.18.0
 LIBCANBERRAGTK_OPTIONAL=0.26
+LIBSOUP_OPTIONAL=2.26
 
 # Check for dependencies
 PKG_CHECK_MODULES([glib],[glib-2.0 >= $LIBGLIB_REQUIRED])
@@ -76,8 +77,35 @@ AC_MSG_CHECKING([if page detaching support should be built])
 AS_IF([test "x$enable_detach" = "xyes"],
 	AC_DEFINE([ENABLE_DETACH],[1],[Define this to enable page detaching.]),
 	enable_detach="no")
-
 AC_MSG_RESULT($enable_detach)
+
+# Serverlist support
+# Let user disable support for getting the serverlist
+AC_ARG_WITH(
+	[libsoup],
+	[
+		AS_HELP_STRING([--with-libsoup], [Ask usage of libsoup for getting a server list (default: auto)])
+		AS_HELP_STRING([--without-libsoup], [Disable usage of libsoup for getting a server list (default: auto)])
+	]
+)
+#AC_MSG_CHECKING([if serverlist support should be built])
+AS_IF(
+	[test "x$with_libsoup" != "xno"],
+	[PKG_CHECK_MODULES(libsoup, [libsoup-2.4 >= $LIBSOUP_OPTIONAL], have_libsoup=yes, have_libsoup=no)],
+	[have_libsoup=no]
+)
+
+AS_IF(
+	[test "x$have_libsoup" = "xyes"],
+	[
+		AC_DEFINE([ENABLE_SERVERLIST],[1],[Define this to enable server list.])
+	],
+	[
+		AS_IF([test "x$with_libsoup" = "xyes"],
+			[AC_MSG_ERROR([libsoup requested but no headers found])]
+		)
+	]
+)
 
 # Generate files
 AC_CONFIG_FILES([
@@ -103,3 +131,4 @@ echo "   Compilation flags:   ${CFLAGS}"
 echo "   CPPFLAGS:            ${CPPFLAGS}"
 echo "   Sound support:       $have_canberragtk"
 echo "   Page detaching:      $enable_detach"
+echo "   Serverlist support:  $have_libsoup"

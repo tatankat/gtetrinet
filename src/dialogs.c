@@ -27,6 +27,10 @@
 #include <dirent.h>
 #include <stdlib.h>
 
+#ifdef ENABLE_SERVERLIST
+#include <libsoup/soup.h>
+#endif
+
 #include "gtetrinet.h"
 #include "gtet_config.h"
 #include "client.h"
@@ -54,7 +58,6 @@ GtkWidget *team_dialog;
 
 void connectingdialog_button (GtkWidget *dialog, gint button)
 {
-    dialog = dialog;
     switch (button) {
     case GTK_RESPONSE_CANCEL:
         g_source_remove (timeouttag);
@@ -127,7 +130,6 @@ void teamdialog_destroy (void)
 void teamdialog_button (GtkWidget *button, gint response, gpointer data)
 {
     GtkEntry *entry = (GtkEntry*)data;//GTK_ENTRY (gnome_entry_gtk_entry ( (data)));
-    button = button; /* so we get no unused parameter warning */
 
     switch (response)
     {
@@ -187,10 +189,11 @@ void teamdialog_new (void)
 /* the connect dialog */
 /**********************/
 static int connecting;
-static GtkWidget *serveraddressentry, *nicknameentry, *teamnameentry, *spectatorcheck, *passwordentry;
+static GtkWidget *serveraddressentry, *serveraddressbox;
+static GtkWidget *nicknameentry, *teamnameentry, *spectatorcheck, *passwordentry;
 static GtkWidget *passwordlabel, *teamnamelabel;
 static GtkWidget *originalradio, *tetrifastradio;
-static GSList *gametypegroup;
+static GtkListStore *serverlist;
 
 void connectdialog_button (GtkDialog *dialog, gint button)
 {
@@ -214,7 +217,6 @@ void connectdialog_button (GtkDialog *dialog, gint button)
           return;
         }
 
-	//spectating = GTK_TOGGLE_BUTTON(spectatorcheck)->active ? TRUE : FALSE;
 	spectating = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(spectatorcheck));
 
         if (spectating)
@@ -288,18 +290,149 @@ void connectdialog_spectoggle (GtkWidget *widget)
 void connectdialog_originaltoggle (GtkWidget *widget)
 {
     if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget))) {
-    //if (GTK_TOGGLE_BUTTON(widget)-> active) {
         gamemode = ORIGINAL;
     }
 }
 
 void connectdialog_tetrifasttoggle (GtkWidget *widget)
 {
-    //if (GTK_TOGGLE_BUTTON(widget)-> active) {
     if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget))) {
         gamemode = TETRIFAST;
     }
 }
+
+#ifdef ENABLE_SERVERLIST
+void serverlist_reset ()
+{
+    GtkTreeIter iter;
+    const gchar *current;
+    const gchar *defaultserver = "tetrinet.fr";
+    const gchar *localhost = "localhost";
+
+    gtk_list_store_clear(serverlist);
+
+    // add current value to the dropdown list
+    current = gtk_entry_get_text(GTK_ENTRY (serveraddressentry));
+    gtk_list_store_append(serverlist, &iter);
+    gtk_list_store_set(serverlist, &iter, 0, current, -1);
+
+    if(strcmp(current, defaultserver)!=0)
+    {
+        gtk_list_store_append(serverlist, &iter);
+        gtk_list_store_set(serverlist, &iter, 0, defaultserver, -1);
+    }
+    if(strcmp(current, localhost)!=0)
+    {
+        gtk_list_store_append(serverlist, &iter);
+        gtk_list_store_set(serverlist, &iter, 0, localhost, -1);
+    }
+}
+void serverlist_xmlparse_open_tag (GMarkupParseContext *context,
+                     const gchar         *element_name,
+                     const gchar        **attribute_names,
+                     const gchar        **attribute_values,
+                     gpointer             user_data,
+                     GError             **error)
+{
+    GtkTreeIter iter;
+    if(strcmp(element_name,"server") == 0)
+    {
+        const gchar *attribute_name;
+        gint i;
+        gboolean hasItem;
+        gboolean found;
+        GtkTreeIter iter;
+
+        i = 0;
+        for (attribute_name = attribute_names[i]; attribute_name; attribute_name = attribute_names[++i])
+        {
+            if (strcmp (attribute_name, "name") == 0)
+            {
+                // Verify if there is already an entry with this name (TODO if there is: update the attributes if/once we show them)
+                found = FALSE;
+                hasItem = gtk_tree_model_get_iter_first(GTK_TREE_MODEL (serverlist), &iter);
+                while(hasItem && !found)
+                {
+                    GValue value = G_VALUE_INIT;
+                    gtk_tree_model_get_value(GTK_TREE_MODEL (serverlist), &iter, 0, &value);
+                    if(strcmp(attribute_values[i], g_value_get_string(&value))==0)
+                    {
+                        found = TRUE;
+                    }
+                    hasItem = gtk_tree_model_iter_next(GTK_TREE_MODEL (serverlist), &iter);
+                    g_value_unset(&value);
+                }
+                if(!found)
+                {
+                    gtk_list_store_append(serverlist, &iter);
+                    gtk_list_store_set(serverlist, &iter, 0, attribute_values[i], -1);
+                }
+            }
+        }
+    }
+}
+void serverlist_xmlparse_error (GMarkupParseContext *context,
+                  GError              *error,
+                  gpointer             user_data)
+{
+    fprintf(stderr, "Error parsing serverlist xml: %s\n", error->message);
+}
+// we don't care about structure in the xml, we only care about the attributes of the server tags
+GMarkupParser serverlist_xmlparser = {
+    serverlist_xmlparse_open_tag
+    , NULL
+    , NULL
+    , NULL
+    , serverlist_xmlparse_error
+};
+void connectdialog_receivelist (SoupSession *session, SoupMessage *msg, gpointer user_data)
+{
+    GError *error = NULL;
+    GMarkupParseContext *ctx;
+
+    if (!SOUP_STATUS_IS_SUCCESSFUL(msg->status_code))
+    {
+	fprintf(
+	    stderr
+	    , "Trying to get server list from %s, we got HTTP code %d: %s\n"
+	    , soup_uri_to_string(soup_message_get_uri(msg),FALSE)
+	    , msg->status_code
+	    , msg->reason_phrase
+	  );
+    }
+    else
+    {
+        //printf("%s", msg->response_body->data);
+	serverlist_reset();
+        ctx = g_markup_parse_context_new(&serverlist_xmlparser, 0, NULL, NULL);
+        g_markup_parse_context_parse(ctx, msg->response_body->data, msg->response_body->length, NULL);
+        g_markup_parse_context_free(ctx);
+	// even with an error, servers may have been added to the list, errors go also through the parser
+        gtk_combo_box_popup(GTK_COMBO_BOX (serveraddressbox)); //produces a warning on gtk 3.24.32: no trigger event for menu popup
+    }
+}
+SoupSession *session;
+void connectdialog_getlist (GtkWidget *widget, char *url)
+{
+    SoupRequestHTTP *request;
+    GError *error;
+    SoupMessage *msg;
+
+    request = soup_session_request_http(session, "GET", url, &error);
+    if(request)
+    {
+        msg = soup_request_http_get_message(request);
+        // async + only return when fully received
+        // already frees msg if not requeued
+        soup_session_queue_message(session, msg, (SoupSessionCallback)connectdialog_receivelist, NULL);
+    }
+    else
+    {
+	fprintf(stderr, "Could not initiate serverlist request to %s: %s", url, error->message);
+	g_error_free(error);
+    }
+}
+#endif
 
 void connectdialog_connected (void)
 {
@@ -313,7 +446,9 @@ void connectdialog_destroy (void)
 
 void connectdialog_new (void)
 {
-    GtkWidget *widget, *table1, *table2, *frame;
+    GtkBuilder *builder;
+    GtkWidget *getlist_button;
+
     /* check if dialog is already displayed */
     if (connecting) 
     {
@@ -323,37 +458,24 @@ void connectdialog_new (void)
     connecting = TRUE;
 
     /* make dialog that asks for address/nickname */
-    connectdialog = gtk_dialog_new_with_buttons ("Connect to server",
-                                                 GTK_WINDOW (app),
-                                                 0,
-                                                 GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL,
-                                                 GTK_STOCK_OK, GTK_RESPONSE_OK,
-                                                 NULL);
-    gtk_dialog_set_default_response (GTK_DIALOG (connectdialog), GTK_RESPONSE_OK);
-    gtk_window_set_resizable (GTK_WINDOW (connectdialog), FALSE);
-    g_signal_connect (G_OBJECT(connectdialog), "response",
-                        G_CALLBACK(connectdialog_button), NULL);
+    builder = gtk_builder_new_from_resource("/apps/gtetrinet/connectdialog.ui");
+    connectdialog = GTK_WIDGET(gtk_builder_get_object(builder, "connectdialog"));
+    gtk_window_set_transient_for(GTK_WINDOW (connectdialog), GTK_WINDOW (app));
 
-    /* main table */
-    table1 = gtk_table_new (2, 2, FALSE);
-    gtk_table_set_row_spacings (GTK_TABLE(table1), GTET_PAD_SMALL);
-    gtk_table_set_col_spacings (GTK_TABLE(table1), GTET_PAD_SMALL);
+    serveraddressentry = GTK_WIDGET (gtk_builder_get_object(builder, "serveraddressentry"));
+    serveraddressbox = GTK_WIDGET (gtk_builder_get_object(builder, "serveraddressbox"));
+    originalradio = GTK_WIDGET (gtk_builder_get_object(builder, "originalradio"));
+    tetrifastradio = GTK_WIDGET (gtk_builder_get_object(builder, "tetrifastradio"));
+    spectatorcheck = GTK_WIDGET (gtk_builder_get_object(builder, "spectatorcheck"));
+    passwordlabel = GTK_WIDGET (gtk_builder_get_object(builder, "passwordlabel"));
+    passwordentry = GTK_WIDGET (gtk_builder_get_object(builder, "passwordentry"));
+    nicknameentry = GTK_WIDGET (gtk_builder_get_object(builder, "nicknameentry"));
+    teamnamelabel = GTK_WIDGET (gtk_builder_get_object(builder, "teamnamelabel"));
+    teamnameentry = GTK_WIDGET (gtk_builder_get_object(builder, "teamnameentry"));
+    getlist_button = GTK_WIDGET (gtk_builder_get_object(builder, "getlist_button"));
 
-    /* server address */
-    table2 = gtk_table_new (2, 1, FALSE);
-
-    serveraddressentry = gtk_entry_new_with_buffer (gtk_entry_buffer_new("Server", 6));
-    g_object_set((GObject*)serveraddressentry,
-                 "activates_default", TRUE, NULL);
     gtk_entry_set_text ((GtkEntry*)serveraddressentry, server);
-    gtk_widget_show (serveraddressentry);
-    gtk_table_attach (GTK_TABLE(table2), serveraddressentry,
-                      0, 1, 0, 1, GTK_FILL | GTK_EXPAND,
-                      GTK_FILL | GTK_EXPAND, 0, 0);
     /* game type radio buttons */
-    originalradio = gtk_radio_button_new_with_mnemonic (NULL, "O_riginal");
-    gametypegroup = gtk_radio_button_get_group (GTK_RADIO_BUTTON(originalradio));
-    tetrifastradio = gtk_radio_button_new_with_mnemonic (gametypegroup, "Tetri_Fast");
     switch (gamemode) {
     case ORIGINAL:
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(originalradio), TRUE);
@@ -362,101 +484,15 @@ void connectdialog_new (void)
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(tetrifastradio), TRUE);
         break;
     }
-    gtk_widget_show (originalradio);
-    gtk_widget_show (tetrifastradio);
-    widget = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, GTET_PAD_SMALL);
-    gtk_box_pack_start (GTK_BOX(widget), originalradio, 0, 0, 0);
-    gtk_box_pack_start (GTK_BOX(widget), tetrifastradio, 0, 0, 0);
-    gtk_widget_show (widget);
-    gtk_table_attach (GTK_TABLE(table2), widget,
-                      0, 1, 1, 2, GTK_FILL, GTK_FILL, 0, 0);
 
-    gtk_table_set_row_spacings (GTK_TABLE(table2), GTET_PAD_SMALL);
-    gtk_table_set_col_spacings (GTK_TABLE(table2), GTET_PAD_SMALL);
-    gtk_container_set_border_width (GTK_CONTAINER(table2), GTET_PAD);
-    gtk_widget_show (table2);
-    frame = gtk_frame_new ("Server address");
-    gtk_container_add (GTK_CONTAINER(frame), table2);
-    gtk_widget_show (frame);
-    gtk_table_attach (GTK_TABLE(table1), frame, 0, 2, 0, 1,
-                      GTK_FILL | GTK_EXPAND, GTK_FILL | GTK_EXPAND, 0, 0);
-
-    /* spectator checkbox + password */
-    table2 = gtk_table_new (1, 1, FALSE);
-
-    spectatorcheck = gtk_check_button_new_with_mnemonic ("Connect as a _spectator");
-    gtk_widget_show (spectatorcheck);
-    gtk_table_attach (GTK_TABLE(table2), spectatorcheck, 0, 2, 0, 1,
-                      GTK_FILL | GTK_EXPAND, GTK_FILL | GTK_EXPAND, 0, 0);
-    passwordlabel = gtk_label_new_with_mnemonic ("_Password:");
-    gtk_widget_show (passwordlabel);
-    gtk_table_attach (GTK_TABLE(table2), passwordlabel, 0, 1, 1, 2,
-                      GTK_FILL | GTK_EXPAND, GTK_FILL | GTK_EXPAND, 0, 0);
-    passwordentry = gtk_entry_new ();
-    gtk_label_set_mnemonic_widget (GTK_LABEL (passwordlabel), passwordentry);
-    gtk_entry_set_visibility (GTK_ENTRY(passwordentry), FALSE);
-    g_object_set(G_OBJECT(passwordentry),
-                 "activates_default", TRUE, NULL);
-    gtk_widget_show (passwordentry);
-    gtk_table_attach (GTK_TABLE(table2), passwordentry, 1, 2, 1, 2,
-                      GTK_FILL | GTK_EXPAND, GTK_FILL | GTK_EXPAND, 0, 0);
-
-    gtk_table_set_row_spacings (GTK_TABLE(table2), GTET_PAD_SMALL);
-    gtk_table_set_col_spacings (GTK_TABLE(table2), GTET_PAD_SMALL);
-    gtk_container_set_border_width (GTK_CONTAINER(table2), GTET_PAD);
-    gtk_widget_show (table2);
-    frame = gtk_frame_new ("Spectate game");
-    gtk_container_add (GTK_CONTAINER(frame), table2);
-    gtk_widget_show (frame);
-    gtk_table_attach (GTK_TABLE(table1), frame, 0, 1, 1, 2,
-                      GTK_FILL | GTK_EXPAND, GTK_FILL | GTK_EXPAND, 0, 0);
-
-    /* nickname and teamname entries */
-    table2 = gtk_table_new (1, 1, FALSE);
-
-    widget = gtk_label_new_with_mnemonic ("_Nick name:");
-    gtk_widget_show (widget);
-    gtk_table_attach (GTK_TABLE(table2), widget, 0, 1, 0, 1,
-                      GTK_FILL | GTK_EXPAND, 0, 0, 0);
-    nicknameentry = gtk_entry_new_with_buffer (gtk_entry_buffer_new("Nickname",8));
-    gtk_label_set_mnemonic_widget (GTK_LABEL (widget), nicknameentry);
-    g_object_set((GObject*)nicknameentry, "activates_default", TRUE, NULL);
     gtk_entry_set_text ((GtkEntry*)nicknameentry, nick);
-    /* g_free (aux);*/
-    gtk_widget_show (nicknameentry);
-    gtk_table_attach (GTK_TABLE(table2), nicknameentry, 1, 2, 0, 1,
-                      GTK_FILL | GTK_EXPAND, 0, 0, 0);
-    teamnamelabel = gtk_label_new_with_mnemonic ("_Team name:");
-    gtk_widget_show (teamnamelabel);
-    gtk_table_attach (GTK_TABLE(table2), teamnamelabel, 0, 1, 1, 2,
-                      GTK_FILL | GTK_EXPAND, 0, 0, 0);
-    teamnameentry = gtk_entry_new_with_buffer (gtk_entry_buffer_new("Teamname", 8));
-    gtk_label_set_mnemonic_widget (GTK_LABEL (teamnamelabel), teamnameentry);
-    g_object_set((GObject*)teamnameentry, "activates_default", TRUE, NULL);
     gtk_entry_set_text ((GtkEntry*)teamnameentry, team);
-    /*g_free (aux);*/
-    gtk_widget_show (teamnameentry);
-    gtk_table_attach (GTK_TABLE(table2), teamnameentry, 1, 2, 1, 2,
-                      GTK_FILL | GTK_EXPAND, 0, 0, 0);
-
-    gtk_table_set_row_spacings (GTK_TABLE(table2), GTET_PAD_SMALL);
-    gtk_table_set_col_spacings (GTK_TABLE(table2), GTET_PAD_SMALL);
-    gtk_container_set_border_width (GTK_CONTAINER(table2), GTET_PAD);
-    gtk_widget_show (table2);
-    frame = gtk_frame_new ("Player information");
-    gtk_container_add (GTK_CONTAINER(frame), table2);
-    gtk_widget_show (frame);
-    gtk_table_attach (GTK_TABLE(table1), frame, 1, 2, 1, 2,
-                      GTK_FILL | GTK_EXPAND, GTK_FILL | GTK_EXPAND, 0, 0);
-
-    gtk_widget_show (table1);
-
-    gtk_container_set_border_width (GTK_CONTAINER (table1), GTET_PAD_SMALL);
-    gtk_box_pack_start (GTK_BOX (gtk_dialog_get_content_area(connectdialog)),
-                        table1, TRUE, TRUE, 0);
 
     gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON(spectatorcheck), spectating);
     connectdialog_spectoggle (spectatorcheck);
+
+    g_signal_connect (G_OBJECT(connectdialog), "response",
+                        G_CALLBACK(connectdialog_button), NULL);
     g_signal_connect (G_OBJECT(connectdialog), "destroy",
                         G_CALLBACK(connectdialog_destroy), NULL);
     g_signal_connect (G_OBJECT(spectatorcheck), "toggled",
@@ -465,6 +501,50 @@ void connectdialog_new (void)
                         G_CALLBACK(connectdialog_originaltoggle), NULL);
     g_signal_connect (G_OBJECT(tetrifastradio), "toggled",
                         G_CALLBACK(connectdialog_tetrifasttoggle), NULL);
+#ifdef ENABLE_SERVERLIST
+    gchar *url;
+    SoupURI *urlObject;
+
+    // check if the serverlistserver setting contains a valid url
+    url = g_settings_get_string(settings, "serverlistserver");
+    urlObject = soup_uri_new(url);
+    if(!urlObject)
+    {
+	fprintf(stderr, "Bad serverlist url setting: %s", url);
+        gtk_button_set_label(GTK_BUTTON (getlist_button), "<Bad URL in settings>");
+    }
+    else
+    {
+        /* edit the label on the button */
+        const gchar *original;
+        const gchar *servername;
+
+        // get the original button label
+        original = gtk_button_get_label(GTK_BUTTON (getlist_button));
+
+        // add the server name to the button label so the user knows where it will connect to
+        servername = soup_uri_get_host(urlObject);
+        gchar concatted[strlen(original)+strlen(servername)+1];
+        strcpy(concatted, original);
+        strcat(concatted, servername);
+        gtk_button_set_label(GTK_BUTTON (getlist_button), concatted);
+        soup_uri_free(urlObject);
+
+        /* other required stuff for serverlist */
+        session = soup_session_new_with_options(
+            "timeout", 60 // the default for sync request (async is 0)
+            , "user-agent", g_strdup_printf("%s/%s",PACKAGE_NAME,PACKAGE_VERSION)
+            , NULL
+        );
+        serverlist = GTK_LIST_STORE(gtk_builder_get_object(builder, "serverlist"));
+        serverlist_reset();
+        g_signal_connect (G_OBJECT(getlist_button), "clicked",
+                            G_CALLBACK(connectdialog_getlist), url);
+    }
+#else
+    gtk_widget_set_visible(getlist_button, FALSE);
+#endif
+
     gtk_widget_show (connectdialog);
 }
 
@@ -743,9 +823,6 @@ void prefdialog_themelist ()
 void prefdialog_response (GtkDialog *dialog,
                           gint arg1)
 {
-
-  dialog = dialog;	/* Supress compile warning */
-
   switch (arg1)
   {
     case GTK_RESPONSE_CLOSE: prefdialog_destroy (); break;

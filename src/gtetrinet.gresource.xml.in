@@ -6,6 +6,7 @@
     <file preprocess="xml-stripblanks">fields.ui</file>
     <file preprocess="xml-stripblanks">field.ui</file>
     <file preprocess="xml-stripblanks">winlist.ui</file>
+    <file preprocess="xml-stripblanks">connectdialog.ui</file>
     <!--<file>some-image.png</file>-->
   </gresource>
 </gresources>

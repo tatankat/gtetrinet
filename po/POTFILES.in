@@ -3,6 +3,7 @@ src/partyline.ui
 src/client.c
 src/commands.c
 src/config.c
+src/connectdialog.ui
 src/dialogs.c
 src/fields.c
 src/fields.ui
